@@ -5,7 +5,7 @@
 
 # Use this to control how many gpu you use, It's 1-gpu training if you specify
 # just 1gpu, otherwise it's is multiple gpu training based on DDP in pytorch
-export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
 # The NCCL_SOCKET_IFNAME variable specifies which IP interface to use for nccl
 # communication. More details can be found in
 # https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html
@@ -23,7 +23,7 @@ num_nodes=1
 # on the second machine, and so on.
 node_rank=0
 # The aishell dataset location, please change this to your own path
-# make sure of using absolute path. DO-NOT-USE relatvie path!
+# make sure of using absolute path. DO-NOT-USE relative path!
 data=/export/data/asr-data/OpenSLR/33/
 data_url=www.openslr.org/resources/33
 
@@ -38,22 +38,24 @@ num_utts_per_shard=1000
 
 train_set=train
 # Optional train_config
-# 1. conf/train_transformer.yaml: Standard transformer
-# 2. conf/train_conformer.yaml: Standard conformer
-# 3. conf/train_unified_conformer.yaml: Unified dynamic chunk causal conformer
-# 4. conf/train_unified_transformer.yaml: Unified dynamic chunk transformer
-# 5. conf/train_u2++_conformer.yaml: U2++ conformer
-# 6. conf/train_u2++_transformer.yaml: U2++ transformer
-train_config=conf/train_conformer.yaml
+#1. train_config=conf/train_cif_conformer_prev1.yaml CIF DecoderSAN + PredictorV1
+#2. train_config=conf/train_cif_conformer_prev2.yaml CIF DecoderSAN + PredictorV1
+#3. train_config=conf/train_cif_conformer_sanm_prev1.yaml CIF DecoderSANM + PredictorV2
+#4. train_config=conf/train_cif_conformer_sanm_prev2.yaml CIF DecoderSANM + PredictorV2
+train_config=conf/train_cif_conformer_sanm_prev1.yaml
 cmvn=true
-dir=exp/conformer
+dir=exp/conformer_sanm_prev1
 checkpoint=
 
 # use average_checkpoint will get better result
 average_checkpoint=true
 decode_checkpoint=$dir/final.pt
-average_num=30
-decode_modes="ctc_greedy_search ctc_prefix_beam_search attention attention_rescoring"
+average_num=20
+#decode_modes="ctc_greedy_search ctc_prefix_beam_search cif_greedy_search cif_beam_search"
+# Since the Predictor Loss also plays an important role in the training of the CIF models,
+# the performance of the predictor cannot be used by using the CTC-related decoding methods,
+# so we strongly recommend that you use the 'cif_greedy_search' and 'cif_beam_search'.
+decode_modes="cif_greedy_search cif_beam_search"
 
 . tools/parse_options.sh || exit 1;
 
@@ -136,19 +138,19 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     # Rank of each gpu/process used for knowing whether it is
     # the master of a worker.
     rank=`expr $node_rank \* $num_gpus + $i`
-    python wenet/bin/train.py --gpu $gpu_id \
+    python3 wenet/bin/train.py --gpu $gpu_id \
       --config $train_config \
       --data_type $data_type \
       --symbol_table $dict \
       --train_data data/$train_set/data.list \
-      --cv_data data/dev/data.list \
+      --cv_data data/test/data.list \
       ${checkpoint:+--checkpoint $checkpoint} \
       --model_dir $dir \
       --ddp.init_method $init_method \
       --ddp.world_size $world_size \
       --ddp.rank $rank \
       --ddp.dist_backend $dist_backend \
-      --num_workers 1 \
+      --num_workers 8 \
       $cmvn_opts \
       --pin_memory
   } &
@@ -161,7 +163,7 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
   if [ ${average_checkpoint} == true ]; then
     decode_checkpoint=$dir/avg_${average_num}.pt
     echo "do model average and final checkpoint is $decode_checkpoint"
-    python wenet/bin/average_model.py \
+    python3 wenet/bin/average_model.py \
       --dst_model $decode_checkpoint \
       --src_path $dir  \
       --num ${average_num} \
@@ -177,7 +179,7 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
   {
     test_dir=$dir/test_${mode}
     mkdir -p $test_dir
-    python wenet/bin/recognize.py --gpu 0 \
+    python3 wenet/bin/recognize.py --gpu 0 \
       --mode $mode \
       --config $dir/train.yaml \
       --data_type $data_type \
@@ -191,7 +193,7 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
       --reverse_weight $reverse_weight \
       --result_file $test_dir/text \
       ${decoding_chunk_size:+--decoding_chunk_size $decoding_chunk_size}
-    python tools/compute-wer.py --char=1 --v=1 \
+    python3 tools/compute-wer.py --char=1 --v=1 \
       data/test/text $test_dir/text > $test_dir/wer
   } &
   done
@@ -201,7 +203,7 @@ fi
 
 if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
   # Export the best model you want
-  python wenet/bin/export_jit.py \
+  python3 wenet/bin/export_jit.py \
     --config $dir/train.yaml \
     --checkpoint $dir/avg_${average_num}.pt \
     --output_file $dir/final.zip \
@@ -263,7 +265,7 @@ if [ ${stage} -le 8 ] && [ ${stop_stage} -ge 8 ]; then
   {
     test_dir=$dir/test_${mode}
     mkdir -p $test_dir
-    python wenet/bin/recognize.py --gpu 0 \
+    python3 wenet/bin/recognize.py --gpu 0 \
       --mode $mode \
       --config $dir/train.yaml \
       --data_type $data_type \
@@ -280,22 +282,9 @@ if [ ${stage} -le 8 ] && [ ${stop_stage} -ge 8 ]; then
       --r_decoder_scale $r_decoder_scale \
       --result_file $test_dir/text \
       ${decoding_chunk_size:+--decoding_chunk_size $decoding_chunk_size}
-    python tools/compute-wer.py --char=1 --v=1 \
+    python3 tools/compute-wer.py --char=1 --v=1 \
       data/test/text $test_dir/text > $test_dir/wer
   }
   done
 fi
 
-# Optionally, you can train with LF-MMI using k2
-# Based on 20210601_u2++_conformer_exp/final.pt, we train 50 epocs with 1e-5 lr
-# and average 10 best models, achieve 4.11 cer with hlg decoding
-# Actually, you can achieve even lower cer by tuning lm_scale/decoder_scale/r_decoder_scale
-if [ ${stage} -le 9 ] && [ ${stop_stage} -ge 9 ]; then
-  # 9.1 Build token level bigram fst for LF-MMI training
-  tools/k2/prepare_mmi.sh data/train/ data/dev data/local/lfmmi
-
-  # 9.2 Run LF-MMI training from stage 4, with below new args
-  # --lfmmi_dir data/local/lfmmi
-
-  # 9.3 Run HLG decode from stage 8.2
-fi
